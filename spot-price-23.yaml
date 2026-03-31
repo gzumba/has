@@ -33,18 +33,63 @@ template:
         attributes:
           raw: '{{ state_attr("sensor.shf_electricity_price", "data") if state_attr("sensor.shf_electricity_price", "data") else state_attr("sensor.shf_data", "raw") }}'
           data: >
-            {% set output = namespace(value=[]) %}
-            {% for value in state_attr("sensor.shf_data","raw") | default([], true) %}
+            {% set raw = state_attr("sensor.shf_data", "raw") | default([], true) %}
+            {% set priced = namespace(value=[]) %}
+
+            {# Pass 1: build entries with TotalPrice #}
+            {% for value in raw %}
               {% set t = value.DateTime | as_datetime | as_local %}
-              {% if t.hour >= state_attr("input_datetime.shf_price2_start", "hour") and t.hour < state_attr("input_datetime.shf_price2_stop", "hour")%}
-                {% set x = states("input_number.shf_price2_slider") %}
+              {% if t.hour >= state_attr("input_datetime.shf_price2_start", "hour")
+                    and t.hour < state_attr("input_datetime.shf_price2_stop", "hour") %}
+                {% set extra = states("input_number.shf_price2_slider") | float(0) %}
               {% else %}
-                {% set x = states("input_number.shf_price1_slider") %}
+                {% set extra = states("input_number.shf_price1_slider") | float(0) %}
               {% endif %}
-              {% set price = value.PriceWithTax + x | float %}
-              {% set new_data = dict(value, **{"Timestamp": t | as_timestamp, "TotalPrice": price}) %}
-              {% set output.value = output.value + [new_data] %}
+
+              {% set total_price = (value.PriceWithTax | float(0)) + extra %}
+              {% set new_data = dict(
+                value,
+                **{
+                  "Timestamp": t | as_timestamp,
+                  "TotalPrice": total_price,
+                  "ApiRank": value.Rank
+                }
+              ) %}
+              {% set priced.value = priced.value + [new_data] %}
             {% endfor %}
+
+            {# Day boundaries in local time #}
+            {% set midnight = today_at("00:00") | as_timestamp %}
+            {% set next_midnight = (today_at("00:00") + timedelta(days=1)) | as_timestamp %}
+            {% set day_after = (today_at("00:00") + timedelta(days=2)) | as_timestamp %}
+
+            {# Sort each day by TotalPrice #}
+            {% set today_sorted = priced.value
+              | selectattr("Timestamp", "ge", midnight)
+              | selectattr("Timestamp", "lt", next_midnight)
+              | sort(attribute="TotalPrice")
+              | list %}
+
+            {% set tomorrow_sorted = priced.value
+              | selectattr("Timestamp", "ge", next_midnight)
+              | selectattr("Timestamp", "lt", day_after)
+              | sort(attribute="TotalPrice")
+              | list %}
+
+            {# Pass 2: write recalculated Rank back to each item #}
+            {% set output = namespace(value=[]) %}
+            {% for item in priced.value %}
+              {% if item.Timestamp >= midnight and item.Timestamp < next_midnight %}
+                {% set new_rank = today_sorted.index(item) + 1 %}
+              {% elif item.Timestamp >= next_midnight and item.Timestamp < day_after %}
+                {% set new_rank = tomorrow_sorted.index(item) + 1 %}
+              {% else %}
+                {% set new_rank = item.Rank %}
+              {% endif %}
+
+              {% set output.value = output.value + [dict(item, **{"Rank": new_rank})] %}
+            {% endfor %}
+
             {{ output.value }}
   - sensor:
       - name: SHF Rank now
@@ -53,9 +98,10 @@ template:
         state_class: measurement
         availability: '{{ state_attr("sensor.shf_data", "data") | selectattr("Timestamp", "lt", now() | as_timestamp) | list | length > 0 }}'
         state: >
-          {% set today = state_attr('sensor.shf_data', 'data') | selectattr("Timestamp", "lt", today_at("23:59") | as_timestamp) | selectattr("Timestamp", "ge", today_at("0:00") | as_timestamp) %}
-          {% set n = state_attr('sensor.shf_data', 'data') | selectattr("Timestamp", "eq", now().replace(minute=0, second=0, microsecond=0) | as_timestamp) | first %}
-          {{ (today | sort(attribute="TotalPrice")).index(n) + 1 }}
+          {% set n = state_attr('sensor.shf_data', 'data')
+            | selectattr("Timestamp", "eq", now().replace(minute=0, second=0, microsecond=0) | as_timestamp)
+            | first %}
+          {{ n["Rank"] if n else none }}
   - sensor:
       - name: SHF Electricity price now
         unique_id: shf_electricity_price_now
