@@ -141,6 +141,7 @@ template:
       - name: SHF Cheapest 4 Hour Period
         unique_id: shf_cheapest_4_hour_period
         icon: mdi:clock-star-four-points
+        device_class: timestamp
         availability: '{{ state_attr("sensor.shf_data", "data") is iterable }}'
         state: >
           {% set output = namespace(cheapest=none, price=999) %}
@@ -156,7 +157,7 @@ template:
               {% endif %}
             {% endif %}
           {% endfor %}
-          {{ output.cheapest | timestamp_local if output.cheapest else 'N/A' }}
+          {{ (output.cheapest | as_datetime).isoformat() if output.cheapest else none }}
         attributes:
           start_time: >
             {% set output = namespace(cheapest=none, price=999) %}
